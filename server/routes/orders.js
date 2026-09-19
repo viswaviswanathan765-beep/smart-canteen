@@ -3,7 +3,7 @@
 const express = require('express');
 const { createOrder, getOrderById, updateOrderStatus } = require('../services/OrderService');
 const { restoreStockForOrder } = require('../services/StockService');
-const { generateUPIPayment, verifyUPIPayment, processRefund } = require('../services/PaymentService');
+const { generateUPIPayment, verifyUPIPayment, processRefund, confirmCustomerPayment } = require('../services/PaymentService');
 const { authenticate } = require('../middleware/auth');
 const { requireAdmin, requireStaff } = require('../middleware/roles');
 const { getDb } = require('../db');
@@ -58,10 +58,18 @@ router.post('/:id/pay/upi', async (req, res) => {
   res.json(result);
 });
 
-// POST /api/orders/:id/pay/upi/verify — verify UPI payment
+// POST /api/orders/:id/pay/upi/verify — verify UPI payment (staff/admin)
 router.post('/:id/pay/upi/verify', authenticate, requireStaff, (req, res) => {
   const { transactionRef } = req.body;
   const result = verifyUPIPayment(parseInt(req.params.id), transactionRef, req.user.id);
+  if (!result.success) return res.status(400).json(result);
+  res.json(result);
+});
+
+// POST /api/orders/:id/pay/upi/confirm — customer self-service confirm (or gateway callback)
+router.post('/:id/pay/upi/confirm', (req, res) => {
+  const { transactionRef } = req.body;
+  const result = confirmCustomerPayment(parseInt(req.params.id), transactionRef);
   if (!result.success) return res.status(400).json(result);
   res.json(result);
 });

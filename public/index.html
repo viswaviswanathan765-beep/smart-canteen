@@ -579,30 +579,36 @@ const CustomerApp = {
             </div>
           `).join('')}
           <div class="flex justify-between" style="padding:12px 8px;font-size:1.15rem;font-weight:800">
-            <span>Total</span>
+            <span>Total Payable</span>
             <span style="color:var(--primary)">${formatCurrency(total)}</span>
           </div>
         </div>
 
-        <h4 style="margin-bottom:10px;font-size:0.9rem;color:var(--text-secondary)">Payment Method</h4>
+        <h4 style="margin-bottom:10px;font-size:0.9rem;color:var(--text-secondary)">Choose Payment Option</h4>
+        
         <div class="payment-option selected" id="pay-upi" onclick="CustomerApp.selectPaymentMethod('UPI')">
           <div class="flex items-center gap-2">
-            <span style="font-size:1.4rem">📱</span>
+            <span style="font-size:1.5rem">📱</span>
             <div>
-              <div style="font-weight:700">UPI Payment</div>
-              <div style="font-size:0.8rem;color:var(--text-muted)">Scan QR code with any UPI app</div>
+              <div style="font-weight:700">UPI Instant Payment</div>
+              <div style="font-size:0.8rem;color:var(--text-muted)">Scan QR or pay via GPay / PhonePe / Paytm</div>
             </div>
           </div>
         </div>
 
-        <div id="upi-qr-section" style="text-align:center;display:none;margin:16px 0">
-          <img id="checkout-qr" src="" style="width:200px;height:200px;border-radius:12px;border:3px solid var(--border-bright)">
-          <div style="margin-top:8px;font-size:0.85rem;color:var(--text-muted)">Scan to pay ${formatCurrency(total)}</div>
+        <div class="payment-option" id="pay-cash" onclick="CustomerApp.selectPaymentMethod('CASH')">
+          <div class="flex items-center gap-2">
+            <span style="font-size:1.5rem">💵</span>
+            <div>
+              <div style="font-weight:700">Pay Cash at Counter</div>
+              <div style="font-size:0.8rem;color:var(--text-muted)">Pay directly when collecting your food</div>
+            </div>
+          </div>
         </div>
 
         <button class="btn btn-primary btn-full btn-lg mt-3" id="checkout-btn"
-                onclick="CustomerApp.placeOnlineOrder()">
-          Place Order → ${formatCurrency(total)}
+                onclick="CustomerApp.proceedToPayment()">
+          Proceed → ${formatCurrency(total)}
         </button>
       </div>
     `;
@@ -617,9 +623,9 @@ const CustomerApp = {
     document.getElementById(`pay-${method.toLowerCase()}`)?.classList.add('selected');
   },
 
-  async placeOnlineOrder() {
+  async proceedToPayment() {
     const btn = document.getElementById('checkout-btn');
-    if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Placing order...'; }
+    if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Creating order...'; }
 
     const result = await API.createOrder({
       items: this.cart.map(c => ({ foodItemId: c.foodItemId, quantity: c.quantity })),
@@ -627,64 +633,169 @@ const CustomerApp = {
     });
 
     if (!result.success) {
-      showToast(result.message || 'Order failed', 'error');
-      if (btn) { btn.disabled = false; btn.innerHTML = 'Place Order'; }
+      showToast(result.message || 'Order creation failed', 'error');
+      if (btn) { btn.disabled = false; btn.innerHTML = 'Proceed'; }
       return;
     }
 
     const order = result.order;
+    const pickupQrDataUrl = result.qrDataUrl;
 
-    // Generate UPI QR
     if (this.selectedPaymentMethod === 'UPI') {
+      // Fetch UPI Payment QR and deep link
       const upiResult = await API.generateUPI(order.id);
+      document.getElementById('checkout-modal')?.remove();
+
       if (upiResult.success) {
-        const qrSection = document.getElementById('upi-qr-section');
-        const qrImg = document.getElementById('checkout-qr');
-        if (qrSection && qrImg) {
-          qrImg.src = upiResult.qrDataUrl;
-          qrSection.style.display = 'block';
-        }
+        this.showUPIPaymentModal(order, upiResult, pickupQrDataUrl);
+      } else {
+        showToast('Could not load UPI details. Order created as pending.', 'warning');
+        this.cart = [];
+        this.updateCartUI();
+        this.closeCart();
+        this.showOrderSuccess(order, pickupQrDataUrl, 'UPI');
       }
+    } else {
+      // Counter Cash flow
+      this.cart = [];
+      this.updateCartUI();
+      document.getElementById('checkout-modal')?.remove();
+      this.closeCart();
+      this.showOrderSuccess(order, pickupQrDataUrl, 'CASH');
     }
-
-    // Clear cart
-    this.cart = [];
-    this.updateCartUI();
-    document.getElementById('checkout-modal')?.remove();
-    this.closeCart();
-
-    // Show order success
-    this.showOrderSuccess(order, result.qrDataUrl);
   },
 
-  showOrderSuccess(order, qrDataUrl) {
+  showUPIPaymentModal(order, upiResult, pickupQrDataUrl) {
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay';
+    modal.id = 'upi-payment-modal';
+    modal.innerHTML = `
+      <div class="modal modal-lg" style="max-width:440px;text-align:center">
+        <div class="modal-header">
+          <div class="modal-title">Complete UPI Payment</div>
+          <button class="btn btn-ghost btn-icon" onclick="CustomerApp.closeUPIModal(${order.id}, '${pickupQrDataUrl}')">✕</button>
+        </div>
+
+        <div style="background:rgba(255,107,43,0.08);border:1px solid rgba(255,107,43,0.25);border-radius:12px;padding:12px;margin:12px 0">
+          <div style="font-size:0.85rem;color:var(--text-secondary)">Payment for Order <strong style="color:var(--text-primary)">${order.order_number}</strong></div>
+          <div style="font-size:2rem;font-weight:900;color:var(--primary);margin:4px 0">${formatCurrency(order.total)}</div>
+          <div style="font-size:0.75rem;color:var(--text-muted)">Smart Canteen Merchant Account</div>
+        </div>
+
+        <!-- Direct UPI link button for mobile devices -->
+        <a href="${upiResult.upiLink}" class="btn btn-primary btn-full btn-lg mb-2" 
+           style="display:flex;align-items:center;justify-content:center;gap:8px;text-decoration:none;font-weight:700"
+           target="_blank">
+          <span style="font-size:1.3rem">📲</span> Pay via UPI App (GPay / PhonePe / Paytm)
+        </a>
+        <div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:12px">
+          (On mobile phones, tap above to open your UPI app directly)
+        </div>
+
+        <div style="display:flex;align-items:center;margin:12px 0">
+          <div style="flex:1;height:1px;background:var(--border)"></div>
+          <span style="padding:0 10px;font-size:0.75rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px">Or Scan QR to Pay</span>
+          <div style="flex:1;height:1px;background:var(--border)"></div>
+        </div>
+
+        <!-- Scannable UPI QR -->
+        <div style="display:inline-block;padding:12px;background:#ffffff;border-radius:16px;box-shadow:0 8px 24px rgba(0,0,0,0.3);margin:4px 0">
+          <img src="${upiResult.qrDataUrl}" style="width:190px;height:190px;display:block;margin:0 auto;border-radius:8px" alt="UPI Payment QR">
+        </div>
+
+        <div style="margin:8px 0 14px;display:flex;align-items:center;justify-content:center;gap:8px">
+          <span style="font-size:0.85rem;color:var(--text-secondary)">UPI ID: <strong style="color:var(--text-primary)">canteen@upi</strong></span>
+          <button class="btn btn-ghost" style="padding:2px 8px;font-size:0.75rem" onclick="navigator.clipboard.writeText('canteen@upi');showToast('UPI ID copied to clipboard!','info')">📋 Copy</button>
+        </div>
+
+        <!-- Confirmation action -->
+        <div style="border-top:1px solid var(--border);padding-top:14px;margin-top:8px">
+          <div style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:8px">
+            After completing the payment in your UPI app:
+          </div>
+          <button class="btn btn-primary btn-full btn-lg" id="btn-confirm-upi"
+                  onclick="CustomerApp.confirmUPIPayment(${order.id}, '${pickupQrDataUrl}')">
+            ✅ I Have Completed Payment
+          </button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+  },
+
+  async confirmUPIPayment(orderId, pickupQrDataUrl) {
+    const btn = document.getElementById('btn-confirm-upi');
+    if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Verifying payment...'; }
+
+    const res = await API.confirmUPI(orderId);
+    if (!res.success) {
+      showToast(res.message || 'Payment confirmation failed', 'error');
+      if (btn) { btn.disabled = false; btn.innerHTML = '✅ I Have Completed Payment'; }
+      return;
+    }
+
+    showToast('Payment verified successfully! 🎉', 'success');
+
+    // Clear cart and close modals
+    this.cart = [];
+    this.updateCartUI();
+    this.closeCart();
+    document.getElementById('upi-payment-modal')?.remove();
+
+    // Fetch refreshed order
+    const orderRes = await API.getOrder(orderId);
+    const order = orderRes.success ? orderRes.order : { id: orderId, order_number: 'Order', status: 'PREPARING' };
+
+    // Show pickup QR code
+    this.showOrderSuccess(order, pickupQrDataUrl, 'UPI');
+  },
+
+  closeUPIModal(orderId, pickupQrDataUrl) {
+    document.getElementById('upi-payment-modal')?.remove();
+    this.cart = [];
+    this.updateCartUI();
+    this.closeCart();
+    showToast('Order created. Payment is marked as pending.', 'info');
+    API.getOrder(orderId).then(res => {
+      const order = res.success ? res.order : { id: orderId, order_number: 'Order', status: 'PENDING' };
+      this.showOrderSuccess(order, pickupQrDataUrl, 'PENDING');
+    });
+  },
+
+  showOrderSuccess(order, qrDataUrl, method = 'UPI') {
     const STATUS_STEPS = ['PENDING', 'PREPARING', 'READY', 'COMPLETED'];
-    const currentIdx = STATUS_STEPS.indexOf(order.status);
+    const currentIdx = STATUS_STEPS.indexOf(order.status) !== -1 ? STATUS_STEPS.indexOf(order.status) : 1;
 
     const modal = document.createElement('div');
     modal.className = 'modal-overlay';
     modal.id = 'order-success-modal';
     modal.innerHTML = `
-      <div class="modal modal-lg" style="text-align:center">
-        <div style="font-size:3rem;margin-bottom:8px">🎉</div>
-        <h2 style="margin-bottom:4px">Order Placed!</h2>
-        <div style="color:var(--text-secondary);margin-bottom:24px">Track your order below</div>
+      <div class="modal modal-lg" style="text-align:center;max-width:440px">
+        <div style="font-size:3rem;margin-bottom:6px">🎉</div>
+        <h2 style="margin-bottom:2px">Order Confirmed!</h2>
+        <div style="color:var(--text-secondary);margin-bottom:16px;font-size:0.85rem">
+          ${method === 'CASH' ? 'Pay at counter during food pickup' : 'Payment received • Kitchen notified'}
+        </div>
 
-        <div class="tracker-status">
-          ${order.token_number ? `
+        <div class="tracker-status" style="border:2px solid var(--primary);border-radius:14px;padding:16px;background:rgba(255,107,43,0.04)">
           <div>
-            <div style="font-size:0.8rem;font-weight:700;text-transform:uppercase;color:var(--text-muted);letter-spacing:1px;margin-bottom:4px">Order Number</div>
-            <div style="font-size:2rem;font-weight:900;color:var(--primary)">${order.order_number}</div>
+            <div style="font-size:0.75rem;font-weight:800;text-transform:uppercase;color:var(--primary);letter-spacing:1.5px;margin-bottom:2px">Food Pickup Token</div>
+            <div style="font-size:2.4rem;font-weight:900;color:var(--primary);line-height:1.1">${order.order_number}</div>
+            ${order.token_number ? `<div style="font-size:0.9rem;color:var(--text-secondary);margin-top:2px">Token #${order.token_number}</div>` : ''}
           </div>
-          ` : `<div style="font-size:1.5rem;font-weight:800;color:var(--primary)">${order.order_number}</div>`}
 
           ${qrDataUrl ? `
-          <div>
-            <img src="${qrDataUrl}" class="tracker-qr">
-            <div style="font-size:0.8rem;color:var(--text-muted);margin-top:6px">Show this QR when collecting your order</div>
+          <div style="margin:14px 0;padding:12px;background:var(--bg-surface);border-radius:12px;border:1px dashed var(--border-bright)">
+            <img src="${qrDataUrl}" class="tracker-qr" style="width:170px;height:170px;margin:0 auto;display:block">
+            <div style="font-size:0.88rem;font-weight:700;color:var(--text-primary);margin-top:8px">
+              🎫 Food Collection QR Code
+            </div>
+            <div style="font-size:0.78rem;color:var(--text-secondary);margin-top:3px;line-height:1.3">
+              👉 <strong>Show this QR at the canteen counter</strong> when collecting your food so staff can verify and hand it over.
+            </div>
           </div>` : ''}
 
-          <div class="status-timeline">
+          <div class="status-timeline" style="margin-top:10px">
             ${STATUS_STEPS.map((step, i) => `
               <div class="timeline-step">
                 <div class="timeline-dot ${i < currentIdx ? 'done' : i === currentIdx ? 'active' : ''}">
@@ -697,7 +808,7 @@ const CustomerApp = {
         </div>
 
         <div style="display:flex;gap:10px;margin-top:16px">
-          <button class="btn btn-primary btn-full" onclick="document.getElementById('order-success-modal').remove()">
+          <button class="btn btn-primary btn-full btn-lg" onclick="document.getElementById('order-success-modal').remove()">
             Done
           </button>
         </div>

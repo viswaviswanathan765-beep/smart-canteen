@@ -50,6 +50,7 @@ const API = {
   cancelOrder:   (id)       => API.post(`/api/orders/${id}/cancel`),
   generateUPI:   (id)       => API.post(`/api/orders/${id}/pay/upi`),
   verifyUPI:     (id, ref)  => API.post(`/api/orders/${id}/pay/upi/verify`, { transactionRef: ref }),
+  confirmUPI:    (id, ref)  => API.post(`/api/orders/${id}/pay/upi/confirm`, { transactionRef: ref }),
   pickupBoard:   ()         => API.get('/api/orders/pickup/board'),
 
   // Counter Orders

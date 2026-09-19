@@ -134,4 +134,32 @@ function processRefund(orderId, adminId) {
   return { success: true };
 }
 
-module.exports = { processCashPayment, generateUPIPayment, verifyUPIPayment, processRefund };
+/**
+ * Customer confirms UPI payment (self-service / gateway callback).
+ */
+function confirmCustomerPayment(orderId, transactionRef) {
+  const db = getDb();
+
+  const order = db.prepare('SELECT id, total, payment_status FROM orders WHERE id = ?').get(orderId);
+  if (!order) return { success: false, message: 'Order not found' };
+  if (order.payment_status === 'PAID') return { success: true, message: 'Already paid' };
+
+  const process = db.transaction(() => {
+    db.prepare(`
+      UPDATE payments SET status = 'PAID', transaction_ref = ?, updated_at = datetime('now')
+      WHERE order_id = ? AND method = 'UPI'
+    `).run(transactionRef || `UPI-CUST-${Date.now()}`, orderId);
+
+    db.prepare(`
+      UPDATE orders SET payment_status = 'PAID', status = 'PREPARING', updated_at = datetime('now')
+      WHERE id = ?
+    `).run(orderId);
+  });
+
+  process();
+  return { success: true, message: 'Payment confirmed successfully' };
+}
+
+module.exports = { processCashPayment, generateUPIPayment, verifyUPIPayment, processRefund, confirmCustomerPayment };
+
+
