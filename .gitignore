@@ -1,0 +1,10 @@
+node_modules/
+canteen.db.bin
+*.db
+*.db.bin
+*.sqlite
+*.sqlite3
+*.log
+.env
+.DS_Store
+Thumbs.db
