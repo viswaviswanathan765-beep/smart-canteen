@@ -8,7 +8,7 @@ const {
   processRefund,
   getReceipt,
 } = require('../services/PaymentService');
-const { verifyAndRedeemQR } = require('../services/QRService');
+const { verifyAndRedeemQR, lookupQR } = require('../services/QRService');
 const { authenticate } = require('../middleware/auth');
 const { requireStaff, requireAdmin } = require('../middleware/roles');
 const { getDb } = require('../db');
@@ -174,6 +174,21 @@ router.get('/receipt/:orderId', (req, res) => {
     return res.status(404).json({ success: false, message: 'Receipt not found' });
   }
   res.json({ success: true, receipt });
+});
+
+/**
+ * POST /api/payments/qr/lookup
+ * Staff/Admin previews customer order details without redeeming token.
+ */
+router.post('/qr/lookup', authenticate, requireStaff, (req, res) => {
+  const { token } = req.body;
+  const result = lookupQR(token);
+
+  if (!result.success) {
+    return res.status(400).json(result);
+  }
+
+  res.json(result);
 });
 
 /**

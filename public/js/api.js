@@ -60,6 +60,7 @@ const API = {
   getPaymentById:     (id)             => API.get(`/api/payments/${id}`),
   refundOrderPayment: (orderId, reason)=> API.post(`/api/payments/${orderId}/refund`, { reason }),
   getReceipt:         (orderId)        => API.get(`/api/payments/receipt/${orderId}`),
+  lookupQR:           (token)          => API.post('/api/payments/qr/lookup', { token }),
   verifyQR:           (token)          => API.post('/api/payments/qr/verify', { token }),
 
   // Counter Orders

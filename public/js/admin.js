@@ -5,6 +5,10 @@
 const AdminApp = {
   user: null,
   currentSection: 'dashboard',
+  scannerInstance: null,
+  scannerActive: false,
+  scannerFacingMode: 'environment',
+  recentScans: [],
 
   async init() {
     const result = await API.me();
@@ -93,6 +97,9 @@ const AdminApp = {
           <button class="btn-counter-order" onclick="POS.open()" id="btn-new-counter-order">
             <span>🏪</span> + New Counter Order
           </button>
+          <button class="btn btn-outline btn-full" onclick="AdminApp.openQRScannerModal()" id="btn-sidebar-scan-qr" style="margin-top:6px;margin-bottom:12px;display:flex;align-items:center;justify-content:center;gap:8px;font-weight:600;font-size:0.85rem;background:var(--bg-elevated);border:1px solid var(--border-accent);color:var(--text-primary);padding:9px 12px;border-radius:var(--radius-md)">
+            <span>📷</span> Scan Pickup QR
+          </button>
 
           <nav class="sidebar-nav">
             <div class="nav-section-label">Overview</div>
@@ -101,6 +108,9 @@ const AdminApp = {
             </div>
 
             <div class="nav-section-label">Orders</div>
+            <div class="nav-item" id="nav-scan-qr" onclick="AdminApp.navigate('scan-qr')">
+              <span class="nav-icon">📷</span> Scan QR / Pickup
+            </div>
             <div class="nav-item" id="nav-all-orders" onclick="AdminApp.navigate('all-orders')">
               <span class="nav-icon">📋</span> All Orders
             </div>
@@ -146,6 +156,9 @@ const AdminApp = {
           <div class="topbar">
             <div class="topbar-title" id="topbar-title">Dashboard</div>
             <div class="flex gap-2">
+              <button class="btn btn-outline btn-sm" onclick="AdminApp.openQRScannerModal()" id="btn-topbar-scan">
+                📷 Scan Customer QR
+              </button>
               <button class="btn btn-primary btn-sm" onclick="POS.open()">🏪 New Counter Order</button>
             </div>
           </div>
@@ -167,6 +180,7 @@ const AdminApp = {
   },
 
   navigate(section) {
+    this.stopCameraScanner();
     this.currentSection = section;
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     const navEl = document.getElementById(`nav-${section}`);
@@ -174,6 +188,7 @@ const AdminApp = {
 
     const titles = {
       dashboard: 'Dashboard',
+      'scan-qr': '📷 Customer QR Scanner & Pickup Verification',
       'all-orders': 'All Orders',
       'counter-orders': 'Counter Orders',
       pickup: 'Pickup Board',
@@ -187,6 +202,7 @@ const AdminApp = {
 
     const sections = {
       dashboard:       () => this.loadDashboard(),
+      'scan-qr':       () => this.loadScanQR(),
       'all-orders':    () => this.loadAllOrders(),
       'counter-orders':() => this.loadCounterOrders(),
       pickup:          () => this.loadPickupBoard(),
@@ -1001,6 +1017,546 @@ const AdminApp = {
 
     showToast('Refund processed successfully! ✅', 'success');
     this.loadPayments();
+  },
+
+  // =============================================
+  // QR SCANNER & PICKUP VERIFICATION
+  // =============================================
+  playScanBeep(success = true) {
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) return;
+      const ctx = new AudioCtx();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.type = success ? 'sine' : 'sawtooth';
+      osc.frequency.setValueAtTime(success ? 880 : 320, ctx.currentTime);
+      if (success) {
+        osc.frequency.exponentialRampToValueAtTime(1320, ctx.currentTime + 0.12);
+      }
+      gain.gain.setValueAtTime(0.15, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.22);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.24);
+    } catch (e) {}
+  },
+
+  async loadScanQR() {
+    this.setContent(`
+      <div class="scanner-page-grid">
+        <!-- Left: Live Scanner & Input -->
+        <div class="scanner-box">
+          <div class="scanner-box-header">
+            <div class="scanner-box-title">
+              <span>📷</span> Live Camera QR Scanner
+            </div>
+            <div class="flex gap-2">
+              <button class="btn btn-outline btn-sm" onclick="AdminApp.toggleCameraFacing()" title="Switch camera" id="btn-camera-flip">
+                🔄 Flip Cam
+              </button>
+              <button class="btn btn-secondary btn-sm" onclick="AdminApp.toggleCameraScanner()" id="btn-camera-toggle">
+                ⏸️ Pause
+              </button>
+            </div>
+          </div>
+
+          <!-- Camera Viewport -->
+          <div class="scanner-viewport-wrapper">
+            <div id="qr-scanner-region"></div>
+            <div class="scanner-reticle-overlay" id="scanner-reticle">
+              <div class="scanner-reticle-corners"></div>
+              <div class="scanner-laser-line"></div>
+            </div>
+          </div>
+
+          <!-- Controls & Upload -->
+          <div class="scanner-controls">
+            <span class="text-small text-muted" id="scanner-status-text">Point camera at customer's order QR code</span>
+            <label class="btn btn-ghost btn-sm" style="margin-left:auto;cursor:pointer">
+              📁 Upload Image
+              <input type="file" accept="image/*" style="display:none" onchange="AdminApp.handleImageUpload(event, 'qr-scanner-region')">
+            </label>
+          </div>
+
+          <!-- Manual Order Number / Token Input -->
+          <div class="scanner-manual-box">
+            <div style="font-size:0.85rem;font-weight:600;margin-bottom:8px;color:var(--text-secondary)">
+              ⌨️ Or Enter Order #, Token, or Code
+            </div>
+            <form onsubmit="AdminApp.handleManualScan(event)" style="display:flex;gap:8px">
+              <input type="text" id="manual-qr-input" class="form-control"
+                     placeholder="e.g. A-1 or ORD-20260920-xxxx" required style="font-family:monospace">
+              <button type="submit" class="btn btn-primary" id="btn-manual-verify">
+                Verify
+              </button>
+            </form>
+          </div>
+        </div>
+
+        <!-- Right: Verification Result -->
+        <div id="scan-result-container">
+          ${this.renderScanIdleResult()}
+        </div>
+      </div>
+
+      <!-- Recent Scans / Counter Pickups -->
+      <div class="card mt-4" style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:20px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+          <div style="font-weight:700;font-size:1rem;display:flex;align-items:center;gap:8px">
+            <span>⏱️</span> Recent Scans & Pickups (This Session)
+          </div>
+          <span class="text-small text-muted" id="recent-scans-count">${this.recentScans.length} scanned</span>
+        </div>
+        <div class="table-responsive">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Token</th>
+                <th>Order #</th>
+                <th>Customer</th>
+                <th>Amount</th>
+                <th>Status</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody id="recent-scans-tbody">
+              ${this.renderRecentScansRows()}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `);
+
+    // Initialize camera
+    setTimeout(() => {
+      this.startCameraScanner('qr-scanner-region');
+    }, 150);
+  },
+
+  renderScanIdleResult() {
+    return `
+      <div class="scanner-result-card" style="text-align:center;padding:48px 24px;border:2px dashed var(--border)">
+        <div style="font-size:3.2rem;margin-bottom:12px;opacity:0.8">🎯</div>
+        <div style="font-size:1.15rem;font-weight:700;margin-bottom:6px">Awaiting Customer QR</div>
+        <div style="font-size:0.85rem;color:var(--text-muted);max-width:320px;margin:0 auto 18px">
+          Align the customer's phone QR code within the camera frame, upload a QR screenshot, or enter the order number manually.
+        </div>
+        <div style="display:inline-flex;align-items:center;gap:8px;padding:6px 14px;background:var(--bg-elevated);border-radius:var(--radius-full);font-size:0.8rem;color:var(--text-secondary)">
+          <span class="pulse-indicator" style="width:8px;height:8px;border-radius:50%;background:var(--success);display:inline-block"></span>
+          Ready to scan
+        </div>
+      </div>
+    `;
+  },
+
+  async startCameraScanner(elementId) {
+    if (!window.Html5Qrcode) {
+      const statusEl = document.getElementById(elementId === 'modal-scanner-region' ? 'modal-scanner-status' : 'scanner-status-text');
+      if (statusEl) statusEl.textContent = 'Scanner library loading...';
+      return;
+    }
+
+    await this.stopCameraScanner();
+
+    try {
+      this.scannerInstance = new Html5Qrcode(elementId);
+      this.scannerActive = true;
+      const config = {
+        fps: 10,
+        qrbox: { width: 220, height: 220 },
+        aspectRatio: 1.0,
+      };
+
+      await this.scannerInstance.start(
+        { facingMode: this.scannerFacingMode },
+        config,
+        (decodedText) => {
+          this.onQRCodeScanned(decodedText, elementId);
+        },
+        () => {}
+      );
+
+      const statusEl = document.getElementById(elementId === 'modal-scanner-region' ? 'modal-scanner-status' : 'scanner-status-text');
+      if (statusEl) statusEl.textContent = '🟢 Camera active — Ready to scan';
+      const toggleBtn = document.getElementById('btn-camera-toggle');
+      if (toggleBtn) toggleBtn.innerHTML = '⏸️ Pause';
+    } catch (err) {
+      this.scannerActive = false;
+      const statusEl = document.getElementById(elementId === 'modal-scanner-region' ? 'modal-scanner-status' : 'scanner-status-text');
+      if (statusEl) {
+        statusEl.innerHTML = '<span style="color:var(--text-muted)">Camera unavailable or blocked. Enter order number or upload QR image.</span>';
+      }
+      const toggleBtn = document.getElementById('btn-camera-toggle');
+      if (toggleBtn) toggleBtn.innerHTML = '▶️ Start Cam';
+    }
+  },
+
+  async stopCameraScanner() {
+    if (this.scannerInstance) {
+      try {
+        if (this.scannerInstance.isScanning) {
+          await this.scannerInstance.stop();
+        }
+        await this.scannerInstance.clear();
+      } catch (e) {}
+      this.scannerInstance = null;
+    }
+    this.scannerActive = false;
+  },
+
+  async toggleCameraScanner(elementId = 'qr-scanner-region') {
+    if (this.scannerActive) {
+      await this.stopCameraScanner();
+      const statusEl = document.getElementById('scanner-status-text');
+      if (statusEl) statusEl.textContent = '⏸️ Camera paused';
+      const toggleBtn = document.getElementById('btn-camera-toggle');
+      if (toggleBtn) toggleBtn.innerHTML = '▶️ Resume';
+    } else {
+      await this.startCameraScanner(elementId);
+    }
+  },
+
+  async toggleCameraFacing(elementId = 'qr-scanner-region') {
+    this.scannerFacingMode = this.scannerFacingMode === 'environment' ? 'user' : 'environment';
+    await this.startCameraScanner(elementId);
+  },
+
+  async handleImageUpload(e, elementId = 'qr-scanner-region') {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+
+    try {
+      showToast('Processing QR image...', 'info');
+      await this.stopCameraScanner();
+      const tempScanner = new Html5Qrcode(elementId);
+      const decodedText = await tempScanner.scanFile(file, true);
+      await tempScanner.clear();
+      this.onQRCodeScanned(decodedText, elementId);
+    } catch (err) {
+      showToast('No QR code found in uploaded image', 'error');
+      this.startCameraScanner(elementId);
+    }
+    e.target.value = '';
+  },
+
+  async onQRCodeScanned(rawText, sourceRegion) {
+    if (!rawText) return;
+
+    const resultContainer = document.getElementById('scan-result-container');
+    const modalResult = document.getElementById('modal-scan-result');
+
+    const loadingHtml = `
+      <div class="scanner-result-card" style="text-align:center;padding:40px 20px">
+        <span class="spinner" style="width:36px;height:36px;margin-bottom:12px"></span>
+        <div style="font-weight:600">Verifying Pickup QR with Server...</div>
+      </div>
+    `;
+
+    if (resultContainer) resultContainer.innerHTML = loadingHtml;
+    if (modalResult) modalResult.innerHTML = loadingHtml;
+
+    // Call backend API verify and redeem
+    const res = await API.verifyQR(rawText);
+
+    if (res.success) {
+      this.playScanBeep(true);
+      showToast('Order verified & completed! Food handed over. ✅', 'success');
+
+      const order = res.order;
+      this.recentScans.unshift({
+        time: new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+        tokenNumber: order.token_number || `#${order.id}`,
+        orderNumber: order.order_number,
+        customerType: order.customer_type || 'ONLINE',
+        total: order.total,
+        status: 'COMPLETED',
+      });
+
+      const successHtml = this.renderScanSuccessResult(order, res.message);
+      if (resultContainer) resultContainer.innerHTML = successHtml;
+      if (modalResult) modalResult.innerHTML = successHtml;
+
+      this.updateRecentScansTable();
+      this.refreshPickupBadge();
+    } else if (res.code === 'ORDER_ALREADY_COLLECTED') {
+      this.playScanBeep(false);
+      showToast('⚠️ WARNING: Order already collected!', 'error');
+
+      const order = res.order || {};
+      this.recentScans.unshift({
+        time: new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+        tokenNumber: order.token_number || '—',
+        orderNumber: order.order_number || '—',
+        customerType: order.customer_type || '—',
+        total: order.total || 0,
+        status: 'DUPLICATE_SCAN',
+      });
+
+      const collectedHtml = this.renderScanAlreadyCollectedResult(order, res.message);
+      if (resultContainer) resultContainer.innerHTML = collectedHtml;
+      if (modalResult) modalResult.innerHTML = collectedHtml;
+
+      this.updateRecentScansTable();
+    } else {
+      this.playScanBeep(false);
+      showToast(res.message || 'Invalid or expired QR code', 'error');
+
+      const failedHtml = this.renderScanFailedResult(res.message, res.order);
+      if (resultContainer) resultContainer.innerHTML = failedHtml;
+      if (modalResult) modalResult.innerHTML = failedHtml;
+    }
+  },
+
+  renderScanSuccessResult(order, message) {
+    const itemsHtml = (order.items || []).map(item => `
+      <div class="scan-item-row">
+        <span><strong>${item.quantity}x</strong> ${escHtml(item.food_name)}</span>
+        <span>${formatCurrency(item.subtotal)}</span>
+      </div>
+    `).join('') || '<div class="text-muted text-small">Items retrieved</div>';
+
+    return `
+      <div class="scanner-result-card status-verified">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+          <span style="font-size:1.8rem">✅</span>
+          <div>
+            <div style="font-weight:800;font-size:1.1rem;color:var(--success)">ORDER VERIFIED & COMPLETED</div>
+            <div style="font-size:0.8rem;color:var(--text-muted)">${escHtml(message || 'Food handed over to customer')}</div>
+          </div>
+        </div>
+
+        <div class="scan-token-hero">
+          <div>
+            <div style="font-size:0.75rem;text-transform:uppercase;color:var(--text-secondary);font-weight:700">Pickup Token</div>
+            <div class="scan-token-num">${escHtml(order.token_number || '#' + order.id)}</div>
+          </div>
+          <div style="text-align:right">
+            <div style="font-size:0.75rem;text-transform:uppercase;color:var(--text-secondary);font-weight:700">Order Number</div>
+            <div style="font-size:0.95rem;font-weight:700;font-family:monospace">${escHtml(order.order_number)}</div>
+          </div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px;font-size:0.85rem">
+          <div>
+            <span class="text-muted">Customer:</span>
+            <strong>${escHtml(order.customer_name || order.customer_type || 'Customer')}</strong>
+          </div>
+          <div>
+            <span class="text-muted">Source:</span>
+            ${getSourceBadge(order.order_source)}
+          </div>
+          <div>
+            <span class="text-muted">Payment:</span>
+            <span class="badge" style="background:rgba(34,197,94,0.15);color:var(--success);font-weight:700">PAID (${formatCurrency(order.total)})</span>
+          </div>
+          <div>
+            <span class="text-muted">Method:</span>
+            <strong>${escHtml(order.payment_method || 'ONLINE')}</strong>
+          </div>
+        </div>
+
+        <div style="font-size:0.8rem;font-weight:700;text-transform:uppercase;color:var(--text-secondary);margin-bottom:4px">
+          📦 Items to Hand Over:
+        </div>
+        <div class="scan-items-list">
+          ${itemsHtml}
+        </div>
+
+        <div style="display:flex;gap:10px;margin-top:18px">
+          <button class="btn btn-outline btn-full" onclick="AdminApp.viewPaymentReceipt(${order.id})">
+            📄 Print Receipt
+          </button>
+          <button class="btn btn-primary btn-full" onclick="AdminApp.resetScanView()">
+            📷 Scan Next Customer
+          </button>
+        </div>
+      </div>
+    `;
+  },
+
+  renderScanAlreadyCollectedResult(order, message) {
+    return `
+      <div class="scanner-result-card status-already-collected">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+          <span style="font-size:2rem">⚠️</span>
+          <div>
+            <div style="font-weight:800;font-size:1.15rem;color:#f59e0b">ORDER ALREADY COLLECTED</div>
+            <div style="font-size:0.85rem;color:var(--text-secondary)">Do NOT dispense food again.</div>
+          </div>
+        </div>
+
+        <div style="background:rgba(245,158,11,0.1);border:1px solid rgba(245,158,11,0.3);border-radius:var(--radius-md);padding:14px;margin-bottom:16px;font-size:0.88rem">
+          <strong>Notice:</strong> ${escHtml(message || 'This QR token has already been scanned and redeemed.')}
+        </div>
+
+        <div class="scan-token-hero">
+          <div>
+            <div style="font-size:0.75rem;text-transform:uppercase;color:var(--text-secondary);font-weight:700">Token</div>
+            <div class="scan-token-num" style="color:#f59e0b">${escHtml(order.token_number || '#' + (order.id || ''))}</div>
+          </div>
+          <div style="text-align:right">
+            <div style="font-size:0.75rem;text-transform:uppercase;color:var(--text-secondary);font-weight:700">Order Number</div>
+            <div style="font-size:0.95rem;font-weight:700;font-family:monospace">${escHtml(order.order_number || '—')}</div>
+          </div>
+        </div>
+
+        <div style="display:flex;gap:10px;margin-top:18px">
+          ${order.id ? `<button class="btn btn-outline btn-full" onclick="AdminApp.viewPaymentReceipt(${order.id})">📄 View Receipt</button>` : ''}
+          <button class="btn btn-primary btn-full" onclick="AdminApp.resetScanView()">
+            📷 Scan Next Customer
+          </button>
+        </div>
+      </div>
+    `;
+  },
+
+  renderScanFailedResult(message, order) {
+    return `
+      <div class="scanner-result-card status-invalid">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+          <span style="font-size:2rem">❌</span>
+          <div>
+            <div style="font-weight:800;font-size:1.15rem;color:var(--danger)">VERIFICATION REJECTED</div>
+            <div style="font-size:0.85rem;color:var(--text-secondary)">Food cannot be handed over.</div>
+          </div>
+        </div>
+
+        <div style="background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:var(--radius-md);padding:14px;margin-bottom:16px;font-size:0.88rem;color:var(--danger)">
+          <strong>Error:</strong> ${escHtml(message || 'Invalid or unknown token.')}
+        </div>
+
+        ${order ? `
+          <div style="font-size:0.85rem;margin-bottom:14px">
+            <div>Order: <strong>${escHtml(order.order_number || '')}</strong></div>
+            <div>Payment Status: <strong>${escHtml(order.payment_status || 'PENDING')}</strong></div>
+          </div>
+        ` : ''}
+
+        <button class="btn btn-secondary btn-full" onclick="AdminApp.resetScanView()">
+          🔄 Try Again
+        </button>
+      </div>
+    `;
+  },
+
+  resetScanView() {
+    const container = document.getElementById('scan-result-container');
+    if (container) container.innerHTML = this.renderScanIdleResult();
+    const manualInput = document.getElementById('manual-qr-input');
+    if (manualInput) {
+      manualInput.value = '';
+      manualInput.focus();
+    }
+  },
+
+  handleManualScan(e) {
+    e.preventDefault();
+    const input = document.getElementById('manual-qr-input');
+    if (!input || !input.value.trim()) return;
+    this.onQRCodeScanned(input.value.trim(), 'qr-scanner-region');
+  },
+
+  renderRecentScansRows() {
+    if (!this.recentScans || this.recentScans.length === 0) {
+      return `<tr><td colspan="7" class="text-center text-muted py-3">No QR pickups scanned in this session yet.</td></tr>`;
+    }
+    return this.recentScans.map(s => `
+      <tr>
+        <td style="font-size:0.8rem;color:var(--text-muted)">${s.time}</td>
+        <td><strong style="color:var(--primary)">${escHtml(s.tokenNumber)}</strong></td>
+        <td style="font-family:monospace;font-size:0.85rem">${escHtml(s.orderNumber)}</td>
+        <td>${escHtml(s.customerType)}</td>
+        <td>${formatCurrency(s.total)}</td>
+        <td>
+          <span class="scan-history-badge" style="${s.status === 'COMPLETED' ? 'background:rgba(34,197,94,0.15);color:var(--success)' : 'background:rgba(245,158,11,0.15);color:#f59e0b'}">
+            ${s.status === 'COMPLETED' ? '✓ Handed Over' : '⚠️ Duplicate'}
+          </span>
+        </td>
+        <td>
+          <button class="btn btn-ghost btn-sm" onclick="AdminApp.onQRCodeScanned('${escHtml(s.orderNumber)}')">Re-check</button>
+        </td>
+      </tr>
+    `).join('');
+  },
+
+  updateRecentScansTable() {
+    const tbody = document.getElementById('recent-scans-tbody');
+    if (tbody) tbody.innerHTML = this.renderRecentScansRows();
+    const countEl = document.getElementById('recent-scans-count');
+    if (countEl) countEl.textContent = `${this.recentScans.length} scanned`;
+  },
+
+  // ---- Modal Quick Scanner ----
+  openQRScannerModal() {
+    const existing = document.getElementById('scanner-quick-modal');
+    if (existing) existing.remove();
+
+    const modal = document.createElement('div');
+    modal.id = 'scanner-quick-modal';
+    modal.className = 'scanner-modal-backdrop';
+    modal.innerHTML = `
+      <div class="scanner-modal-container">
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:18px 24px;border-bottom:1px solid var(--border)">
+          <div style="font-weight:800;font-size:1.15rem;display:flex;align-items:center;gap:8px">
+            <span>📷</span> Scan Customer QR Code
+          </div>
+          <button class="btn btn-ghost btn-sm" onclick="AdminApp.closeQRScannerModal()" style="font-size:1.2rem;line-height:1">✕</button>
+        </div>
+
+        <div style="padding:24px">
+          <!-- Viewport -->
+          <div class="scanner-viewport-wrapper" style="min-height:280px">
+            <div id="modal-scanner-region"></div>
+            <div class="scanner-reticle-overlay">
+              <div class="scanner-reticle-corners"></div>
+              <div class="scanner-laser-line"></div>
+            </div>
+          </div>
+
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px">
+            <span class="text-small text-muted" id="modal-scanner-status">Align customer QR code in the frame</span>
+            <label class="btn btn-ghost btn-sm" style="cursor:pointer">
+              📁 Upload Image
+              <input type="file" accept="image/*" style="display:none" onchange="AdminApp.handleImageUpload(event, 'modal-scanner-region')">
+            </label>
+          </div>
+
+          <!-- Manual Code Form -->
+          <div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
+            <form onsubmit="AdminApp.handleModalManualScan(event)" style="display:flex;gap:8px">
+              <input type="text" id="modal-manual-qr-input" class="form-control"
+                     placeholder="Or enter Order #, Token (e.g. A-1), or code" style="font-family:monospace" required>
+              <button type="submit" class="btn btn-primary">Verify</button>
+            </form>
+          </div>
+
+          <!-- Dynamic Result Box inside Modal -->
+          <div id="modal-scan-result" style="margin-top:16px"></div>
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(modal);
+
+    setTimeout(() => {
+      this.startCameraScanner('modal-scanner-region');
+    }, 150);
+  },
+
+  async closeQRScannerModal() {
+    await this.stopCameraScanner();
+    const modal = document.getElementById('scanner-quick-modal');
+    if (modal) modal.remove();
+  },
+
+  handleModalManualScan(e) {
+    e.preventDefault();
+    const input = document.getElementById('modal-manual-qr-input');
+    if (!input || !input.value.trim()) return;
+    this.onQRCodeScanned(input.value.trim(), 'modal-scanner-region');
   },
 
   // ---- POS Overlay HTML ----
