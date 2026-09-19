@@ -190,6 +190,7 @@ function initSchema() {
       payment_status TEXT NOT NULL DEFAULT 'PENDING',
       subtotal REAL NOT NULL DEFAULT 0,
       total REAL NOT NULL DEFAULT 0,
+      amount_paise INTEGER NOT NULL DEFAULT 0,
       notes TEXT,
       created_by_admin_id INTEGER,
       stock_deducted INTEGER NOT NULL DEFAULT 0,
@@ -204,21 +205,51 @@ function initSchema() {
       food_name TEXT NOT NULL,
       quantity INTEGER NOT NULL,
       unit_price REAL NOT NULL,
-      subtotal REAL NOT NULL
+      unit_price_paise INTEGER NOT NULL DEFAULT 0,
+      subtotal REAL NOT NULL,
+      subtotal_paise INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS payments (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       order_id INTEGER NOT NULL,
+      provider TEXT NOT NULL DEFAULT 'CASH',
+      provider_order_id TEXT,
+      provider_payment_id TEXT,
       method TEXT NOT NULL,
-      amount_due REAL NOT NULL,
+      amount_paise INTEGER NOT NULL DEFAULT 0,
+      currency TEXT NOT NULL DEFAULT 'INR',
+      amount_due REAL NOT NULL DEFAULT 0,
       amount_received REAL,
       change_amount REAL NOT NULL DEFAULT 0,
       cashier_id INTEGER,
+      signature_verified INTEGER NOT NULL DEFAULT 0,
+      webhook_verified INTEGER NOT NULL DEFAULT 0,
+      verified_at TEXT,
+      idempotency_key TEXT,
       transaction_ref TEXT,
       upi_qr_data TEXT,
-      status TEXT NOT NULL DEFAULT 'PENDING',
+      status TEXT NOT NULL DEFAULT 'CREATED',
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS qr_tokens (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_id INTEGER NOT NULL,
+      token_hash TEXT NOT NULL UNIQUE,
+      status TEXT NOT NULL DEFAULT 'ACTIVE',
+      used_at TEXT,
+      used_by_admin_id INTEGER,
+      expires_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS webhook_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      event_id TEXT NOT NULL UNIQUE,
+      provider TEXT NOT NULL DEFAULT 'RAZORPAY',
+      event_type TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'PROCESSED',
+      processed_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE TABLE IF NOT EXISTS stock_history (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -233,6 +264,68 @@ function initSchema() {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
+
+  // Run column migrations for existing SQLite databases
+  try {
+    const orderCols = db.prepare("PRAGMA table_info(orders)").all().map(c => c.name);
+    if (!orderCols.includes('amount_paise')) {
+      db.exec("ALTER TABLE orders ADD COLUMN amount_paise INTEGER NOT NULL DEFAULT 0");
+    }
+  } catch (_) {}
+
+  try {
+    const itemCols = db.prepare("PRAGMA table_info(order_items)").all().map(c => c.name);
+    if (!itemCols.includes('unit_price_paise')) {
+      db.exec("ALTER TABLE order_items ADD COLUMN unit_price_paise INTEGER NOT NULL DEFAULT 0");
+    }
+    if (!itemCols.includes('subtotal_paise')) {
+      db.exec("ALTER TABLE order_items ADD COLUMN subtotal_paise INTEGER NOT NULL DEFAULT 0");
+    }
+  } catch (_) {}
+
+  try {
+    const paymentCols = db.prepare("PRAGMA table_info(payments)").all().map(c => c.name);
+    if (!paymentCols.includes('provider')) {
+      db.exec("ALTER TABLE payments ADD COLUMN provider TEXT NOT NULL DEFAULT 'CASH'");
+    }
+    if (!paymentCols.includes('provider_order_id')) {
+      db.exec("ALTER TABLE payments ADD COLUMN provider_order_id TEXT");
+    }
+    if (!paymentCols.includes('provider_payment_id')) {
+      db.exec("ALTER TABLE payments ADD COLUMN provider_payment_id TEXT");
+    }
+    if (!paymentCols.includes('amount_paise')) {
+      db.exec("ALTER TABLE payments ADD COLUMN amount_paise INTEGER NOT NULL DEFAULT 0");
+    }
+    if (!paymentCols.includes('currency')) {
+      db.exec("ALTER TABLE payments ADD COLUMN currency TEXT NOT NULL DEFAULT 'INR'");
+    }
+    if (!paymentCols.includes('signature_verified')) {
+      db.exec("ALTER TABLE payments ADD COLUMN signature_verified INTEGER NOT NULL DEFAULT 0");
+    }
+    if (!paymentCols.includes('webhook_verified')) {
+      db.exec("ALTER TABLE payments ADD COLUMN webhook_verified INTEGER NOT NULL DEFAULT 0");
+    }
+    if (!paymentCols.includes('verified_at')) {
+      db.exec("ALTER TABLE payments ADD COLUMN verified_at TEXT");
+    }
+    if (!paymentCols.includes('idempotency_key')) {
+      db.exec("ALTER TABLE payments ADD COLUMN idempotency_key TEXT");
+    }
+  } catch (_) {}
+
+  // Create indexes after columns exist
+  try {
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_payments_order ON payments(order_id);
+      CREATE INDEX IF NOT EXISTS idx_payments_provider_order ON payments(provider_order_id);
+      CREATE INDEX IF NOT EXISTS idx_payments_provider_payment ON payments(provider_payment_id);
+      CREATE INDEX IF NOT EXISTS idx_qr_tokens_hash ON qr_tokens(token_hash);
+      CREATE INDEX IF NOT EXISTS idx_qr_tokens_order ON qr_tokens(order_id);
+      CREATE INDEX IF NOT EXISTS idx_webhook_events_id ON webhook_events(event_id);
+    `);
+  } catch (_) {}
+
 
   seedData();
 }

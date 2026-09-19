@@ -71,7 +71,9 @@ async function createOrder(payload) {
     if (!food.is_available) return { success: false, message: `"${food.name}" is not available` };
     if (food.stock < item.quantity) return { success: false, message: `Only ${food.stock} "${food.name}" in stock` };
 
-    const lineTotal = parseFloat((food.price * item.quantity).toFixed(2));
+    const unitPricePaise = Math.round(food.price * 100);
+    const lineTotalPaise = unitPricePaise * item.quantity;
+    const lineTotal = parseFloat((lineTotalPaise / 100).toFixed(2));
     subtotal += lineTotal;
 
     validatedItems.push({
@@ -79,43 +81,48 @@ async function createOrder(payload) {
       foodName: food.name,
       quantity: item.quantity,
       unitPrice: food.price,
+      unitPricePaise,
       subtotal: lineTotal,
+      subtotalPaise: lineTotalPaise,
     });
   }
 
   const total = parseFloat(subtotal.toFixed(2));
+  const amountPaise = Math.round(total * 100);
 
-  // Create order + items + deduct stock in one transaction
+  // Create order + items inside transaction
   const createTx = db.transaction(() => {
     const orderNumber = getNextOrderNumber(orderSource);
-
-    // Generate token for counter orders
     const token = orderSource === 'COUNTER' ? generateToken() : null;
 
     const orderResult = db.prepare(`
       INSERT INTO orders (
         order_number, token_number, order_source, customer_type,
         customer_name, customer_mobile, customer_user_id,
-        payment_method, subtotal, total,
+        payment_method, subtotal, total, amount_paise,
         created_by_admin_id, notes, stock_deducted
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
     `).run(
       orderNumber, token, orderSource, customerType,
       customerName, customerMobile, customerUserId,
-      paymentMethod, subtotal, total,
+      paymentMethod, subtotal, total, amountPaise,
       createdByAdminId, notes
     );
 
     const orderId = orderResult.lastInsertRowid;
 
-    // Insert line items
+    // Insert line items with paise
     const insertItem = db.prepare(`
-      INSERT INTO order_items (order_id, food_item_id, food_name, quantity, unit_price, subtotal)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO order_items (
+        order_id, food_item_id, food_name, quantity, unit_price, unit_price_paise, subtotal, subtotal_paise
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     for (const vi of validatedItems) {
-      insertItem.run(orderId, vi.foodItemId, vi.foodName, vi.quantity, vi.unitPrice, vi.subtotal);
+      insertItem.run(
+        orderId, vi.foodItemId, vi.foodName, vi.quantity,
+        vi.unitPrice, vi.unitPricePaise, vi.subtotal, vi.subtotalPaise
+      );
     }
 
     return orderId;
@@ -123,33 +130,35 @@ async function createOrder(payload) {
 
   const orderId = createTx();
 
-  // Deduct stock atomically (outside the order creation TX for cleaner rollback semantics)
-  const stockReason = orderSource === 'COUNTER' ? 'COUNTER_ORDER' : 'ONLINE_ORDER';
-  const stockResult = deductStock(
-    validatedItems.map(v => ({ foodItemId: v.foodItemId, quantity: v.quantity })),
-    stockReason,
-    orderId,
-    createdByAdminId
-  );
+  // For COUNTER orders created directly by cashier, deduct stock immediately
+  if (orderSource === 'COUNTER') {
+    const stockResult = deductStock(
+      validatedItems.map(v => ({ foodItemId: v.foodItemId, quantity: v.quantity })),
+      'COUNTER_ORDER',
+      orderId,
+      createdByAdminId
+    );
 
-  if (!stockResult.success) {
-    // Rollback order (cancel it)
-    db.prepare("UPDATE orders SET status = 'CANCELLED', updated_at = datetime('now') WHERE id = ?").run(orderId);
-    return { success: false, message: stockResult.message };
+    if (!stockResult.success) {
+      db.prepare("UPDATE orders SET status = 'CANCELLED', updated_at = datetime('now') WHERE id = ?").run(orderId);
+      return { success: false, message: stockResult.message };
+    }
+
+    db.prepare("UPDATE orders SET stock_deducted = 1, updated_at = datetime('now') WHERE id = ?").run(orderId);
   }
 
-  // Mark stock as deducted (for idempotent cancellation)
-  db.prepare("UPDATE orders SET stock_deducted = 1, updated_at = datetime('now') WHERE id = ?").run(orderId);
-
-  // Fetch the created order
+  // Fetch created order
   const order = getOrderById(orderId);
 
-  // Generate QR code
+  // Generate QR only for counter orders or if already confirmed
   let qrDataUrl = null;
-  try {
-    qrDataUrl = await generateOrderQR(order);
-  } catch (e) {
-    console.warn('QR generation failed:', e.message);
+  if (orderSource === 'COUNTER') {
+    try {
+      const qrRes = await generateOrderQR(order);
+      qrDataUrl = qrRes.qrDataUrl;
+    } catch (e) {
+      console.warn('QR generation failed:', e.message);
+    }
   }
 
   return { success: true, order, qrDataUrl };

@@ -7,6 +7,7 @@
   <meta name="theme-color" content="#ff6b35">
   <title>Smart Canteen — Order Online</title>
   <link rel="stylesheet" href="/css/main.css">
+  <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
   <style>
     /* ---- Customer app styles ---- */
     .hero {
@@ -586,12 +587,22 @@ const CustomerApp = {
 
         <h4 style="margin-bottom:10px;font-size:0.9rem;color:var(--text-secondary)">Choose Payment Option</h4>
         
-        <div class="payment-option selected" id="pay-upi" onclick="CustomerApp.selectPaymentMethod('UPI')">
+        <div class="payment-option selected" id="pay-razorpay" onclick="CustomerApp.selectPaymentMethod('RAZORPAY')">
+          <div class="flex items-center gap-2">
+            <span style="font-size:1.5rem">💳</span>
+            <div>
+              <div style="font-weight:700">Razorpay Gateway (Recommended)</div>
+              <div style="font-size:0.8rem;color:var(--text-muted)">UPI, Google Pay, Cards, Netbanking & Wallets</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="payment-option" id="pay-upi" onclick="CustomerApp.selectPaymentMethod('UPI')">
           <div class="flex items-center gap-2">
             <span style="font-size:1.5rem">📱</span>
             <div>
-              <div style="font-weight:700">UPI Instant Payment</div>
-              <div style="font-size:0.8rem;color:var(--text-muted)">Scan QR or pay via GPay / PhonePe / Paytm</div>
+              <div style="font-weight:700">Direct UPI & QR</div>
+              <div style="font-size:0.8rem;color:var(--text-muted)">Scan QR or tap to open UPI app</div>
             </div>
           </div>
         </div>
@@ -608,14 +619,14 @@ const CustomerApp = {
 
         <button class="btn btn-primary btn-full btn-lg mt-3" id="checkout-btn"
                 onclick="CustomerApp.proceedToPayment()">
-          Proceed → ${formatCurrency(total)}
+          Pay Now → ${formatCurrency(total)}
         </button>
       </div>
     `;
     document.body.appendChild(modal);
   },
 
-  selectedPaymentMethod: 'UPI',
+  selectedPaymentMethod: 'RAZORPAY',
 
   selectPaymentMethod(method) {
     this.selectedPaymentMethod = method;
@@ -625,7 +636,7 @@ const CustomerApp = {
 
   async proceedToPayment() {
     const btn = document.getElementById('checkout-btn');
-    if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Creating order...'; }
+    if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Preparing order...'; }
 
     const result = await API.createOrder({
       items: this.cart.map(c => ({ foodItemId: c.foodItemId, quantity: c.quantity })),
@@ -634,38 +645,173 @@ const CustomerApp = {
 
     if (!result.success) {
       showToast(result.message || 'Order creation failed', 'error');
-      if (btn) { btn.disabled = false; btn.innerHTML = 'Proceed'; }
+      if (btn) { btn.disabled = false; btn.innerHTML = 'Pay Now'; }
       return;
     }
 
     const order = result.order;
-    const pickupQrDataUrl = result.qrDataUrl;
 
-    if (this.selectedPaymentMethod === 'UPI') {
-      // Fetch UPI Payment QR and deep link
+    if (this.selectedPaymentMethod === 'RAZORPAY') {
+      document.getElementById('checkout-modal')?.remove();
+      this.initiateRazorpayCheckout(order);
+    } else if (this.selectedPaymentMethod === 'UPI') {
       const upiResult = await API.generateUPI(order.id);
       document.getElementById('checkout-modal')?.remove();
-
       if (upiResult.success) {
-        this.showUPIPaymentModal(order, upiResult, pickupQrDataUrl);
+        this.showUPIPaymentModal(order, upiResult);
       } else {
-        showToast('Could not load UPI details. Order created as pending.', 'warning');
         this.cart = [];
         this.updateCartUI();
         this.closeCart();
-        this.showOrderSuccess(order, pickupQrDataUrl, 'UPI');
+        this.showOrderSuccess(order, null, 'UPI');
       }
     } else {
-      // Counter Cash flow
+      // Cash at Counter
       this.cart = [];
       this.updateCartUI();
       document.getElementById('checkout-modal')?.remove();
       this.closeCart();
-      this.showOrderSuccess(order, pickupQrDataUrl, 'CASH');
+      this.showOrderSuccess(order, result.qrDataUrl, 'CASH');
     }
   },
 
-  showUPIPaymentModal(order, upiResult, pickupQrDataUrl) {
+  async initiateRazorpayCheckout(order) {
+    showToast('Initializing payment gateway...', 'info');
+
+    const paymentRes = await API.createPaymentOrder({
+      orderId: order.id,
+      providerName: 'RAZORPAY',
+      idempotencyKey: `ord_${order.id}_${Date.now()}`,
+    });
+
+    if (!paymentRes.success) {
+      showToast(paymentRes.message || 'Could not initiate Razorpay order', 'error');
+      return;
+    }
+
+    // Check if live Razorpay script is available
+    if (window.Razorpay && !paymentRes.testMode) {
+      try {
+        const options = {
+          key: paymentRes.keyId,
+          amount: paymentRes.amountPaise,
+          currency: paymentRes.currency || 'INR',
+          name: 'Smart Canteen',
+          description: `Order #${order.order_number}`,
+          order_id: paymentRes.providerOrderId,
+          handler: async (response) => {
+            await CustomerApp.verifyAndCompletePayment({
+              providerOrderId: response.razorpay_order_id,
+              providerPaymentId: response.razorpay_payment_id,
+              signature: response.razorpay_signature,
+              orderId: order.id,
+            });
+          },
+          prefill: {
+            name: order.customer_name || '',
+            contact: order.customer_mobile || '',
+          },
+          theme: { color: '#ff6b35' },
+          modal: {
+            ondismiss: () => {
+              showToast('Payment window closed. Order is pending.', 'info');
+            },
+          },
+        };
+
+        const rzp = new window.Razorpay(options);
+        rzp.open();
+        return;
+      } catch (e) {
+        console.warn('Live Razorpay popup failed, showing test simulator modal:', e.message);
+      }
+    }
+
+    // Development & Test Mode Simulator Modal
+    this.openRazorpaySimulator(order, paymentRes.providerOrderId, paymentRes.amountPaise);
+  },
+
+  openRazorpaySimulator(order, providerOrderId, amountPaise) {
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay';
+    modal.id = 'razorpay-sim-modal';
+    modal.innerHTML = `
+      <div class="modal modal-lg" style="max-width:440px;text-align:center">
+        <div class="modal-header">
+          <div class="modal-title">Razorpay Payment Gateway</div>
+          <button class="btn btn-ghost btn-icon" onclick="document.getElementById('razorpay-sim-modal').remove()">✕</button>
+        </div>
+
+        <div style="background:rgba(255,107,43,0.08);border:1px solid rgba(255,107,43,0.25);border-radius:12px;padding:16px;margin:12px 0">
+          <div style="font-size:0.85rem;color:var(--text-secondary)">Paying for <strong>${order.order_number}</strong></div>
+          <div style="font-size:2.2rem;font-weight:900;color:var(--primary);margin:4px 0">${formatCurrency(amountPaise / 100)}</div>
+          <div style="font-size:0.75rem;color:var(--text-muted)">Razorpay Test Mode / Safe Sandbox</div>
+        </div>
+
+        <div style="text-align:left;background:var(--bg-surface);border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:16px">
+          <div style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:4px">Gateway Order ID:</div>
+          <div style="font-family:monospace;font-size:0.85rem;color:var(--text-primary);word-break:break-all">${providerOrderId}</div>
+        </div>
+
+        <div style="display:flex;flex-direction:column;gap:10px">
+          <button class="btn btn-primary btn-full btn-lg" id="btn-sim-success" onclick="CustomerApp.simulateTestPayment('${providerOrderId}', true, ${order.id})">
+            ✅ Simulate Successful Payment
+          </button>
+          <button class="btn btn-outline btn-full" onclick="CustomerApp.simulateTestPayment('${providerOrderId}', false, ${order.id})">
+            ❌ Simulate Failed / Cancelled Payment
+          </button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+  },
+
+  async simulateTestPayment(providerOrderId, isSuccess, orderId) {
+    document.getElementById('razorpay-sim-modal')?.remove();
+
+    if (!isSuccess) {
+      showToast('Payment was cancelled or failed', 'error');
+      return;
+    }
+
+    // Generate valid test signature using test secret
+    const testPaymentId = `pay_${Date.now()}`;
+    const rawText = `${providerOrderId}|${testPaymentId}`;
+    
+    // Send to backend verify
+    await this.verifyAndCompletePayment({
+      providerOrderId,
+      providerPaymentId: testPaymentId,
+      signature: 'test_mode_signature', // Backend test provider checks this
+      orderId,
+    });
+  },
+
+  async verifyAndCompletePayment({ providerOrderId, providerPaymentId, signature, orderId }) {
+    showToast('Verifying payment signature...', 'info');
+
+    const verifyRes = await API.verifyPayment({
+      providerOrderId,
+      providerPaymentId,
+      signature,
+      providerName: 'RAZORPAY',
+    });
+
+    if (!verifyRes.success) {
+      showToast(verifyRes.message || 'Payment verification failed', 'error');
+      return;
+    }
+
+    showToast('Payment Successful! ✅ Order confirmed', 'success');
+
+    this.cart = [];
+    this.updateCartUI();
+    this.closeCart();
+
+    this.showOrderSuccess(verifyRes.order, verifyRes.qrDataUrl, 'RAZORPAY');
+  },
+
+  showUPIPaymentModal(order, upiResult) {
     const modal = document.createElement('div');
     modal.className = 'modal-overlay';
     modal.id = 'upi-payment-modal';
@@ -673,7 +819,7 @@ const CustomerApp = {
       <div class="modal modal-lg" style="max-width:440px;text-align:center">
         <div class="modal-header">
           <div class="modal-title">Complete UPI Payment</div>
-          <button class="btn btn-ghost btn-icon" onclick="CustomerApp.closeUPIModal(${order.id}, '${pickupQrDataUrl}')">✕</button>
+          <button class="btn btn-ghost btn-icon" onclick="document.getElementById('upi-payment-modal').remove()">✕</button>
         </div>
 
         <div style="background:rgba(255,107,43,0.08);border:1px solid rgba(255,107,43,0.25);border-radius:12px;padding:12px;margin:12px 0">
@@ -682,39 +828,30 @@ const CustomerApp = {
           <div style="font-size:0.75rem;color:var(--text-muted)">Smart Canteen Merchant Account</div>
         </div>
 
-        <!-- Direct UPI link button for mobile devices -->
         <a href="${upiResult.upiLink}" class="btn btn-primary btn-full btn-lg mb-2" 
            style="display:flex;align-items:center;justify-content:center;gap:8px;text-decoration:none;font-weight:700"
            target="_blank">
           <span style="font-size:1.3rem">📲</span> Pay via UPI App (GPay / PhonePe / Paytm)
         </a>
-        <div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:12px">
-          (On mobile phones, tap above to open your UPI app directly)
-        </div>
 
         <div style="display:flex;align-items:center;margin:12px 0">
           <div style="flex:1;height:1px;background:var(--border)"></div>
-          <span style="padding:0 10px;font-size:0.75rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px">Or Scan QR to Pay</span>
+          <span style="padding:0 10px;font-size:0.75rem;color:var(--text-muted);text-transform:uppercase">Or Scan QR to Pay</span>
           <div style="flex:1;height:1px;background:var(--border)"></div>
         </div>
 
-        <!-- Scannable UPI QR -->
         <div style="display:inline-block;padding:12px;background:#ffffff;border-radius:16px;box-shadow:0 8px 24px rgba(0,0,0,0.3);margin:4px 0">
           <img src="${upiResult.qrDataUrl}" style="width:190px;height:190px;display:block;margin:0 auto;border-radius:8px" alt="UPI Payment QR">
         </div>
 
         <div style="margin:8px 0 14px;display:flex;align-items:center;justify-content:center;gap:8px">
           <span style="font-size:0.85rem;color:var(--text-secondary)">UPI ID: <strong style="color:var(--text-primary)">canteen@upi</strong></span>
-          <button class="btn btn-ghost" style="padding:2px 8px;font-size:0.75rem" onclick="navigator.clipboard.writeText('canteen@upi');showToast('UPI ID copied to clipboard!','info')">📋 Copy</button>
+          <button class="btn btn-ghost" style="padding:2px 8px;font-size:0.75rem" onclick="navigator.clipboard.writeText('canteen@upi');showToast('UPI ID copied!','info')">📋 Copy</button>
         </div>
 
-        <!-- Confirmation action -->
         <div style="border-top:1px solid var(--border);padding-top:14px;margin-top:8px">
-          <div style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:8px">
-            After completing the payment in your UPI app:
-          </div>
           <button class="btn btn-primary btn-full btn-lg" id="btn-confirm-upi"
-                  onclick="CustomerApp.confirmUPIPayment(${order.id}, '${pickupQrDataUrl}')">
+                  onclick="CustomerApp.confirmUPIPayment(${order.id})">
             ✅ I Have Completed Payment
           </button>
         </div>
@@ -723,7 +860,7 @@ const CustomerApp = {
     document.body.appendChild(modal);
   },
 
-  async confirmUPIPayment(orderId, pickupQrDataUrl) {
+  async confirmUPIPayment(orderId) {
     const btn = document.getElementById('btn-confirm-upi');
     if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Verifying payment...'; }
 
@@ -735,34 +872,17 @@ const CustomerApp = {
     }
 
     showToast('Payment verified successfully! 🎉', 'success');
-
-    // Clear cart and close modals
     this.cart = [];
     this.updateCartUI();
     this.closeCart();
     document.getElementById('upi-payment-modal')?.remove();
 
-    // Fetch refreshed order
     const orderRes = await API.getOrder(orderId);
     const order = orderRes.success ? orderRes.order : { id: orderId, order_number: 'Order', status: 'PREPARING' };
-
-    // Show pickup QR code
-    this.showOrderSuccess(order, pickupQrDataUrl, 'UPI');
+    this.showOrderSuccess(order, null, 'UPI');
   },
 
-  closeUPIModal(orderId, pickupQrDataUrl) {
-    document.getElementById('upi-payment-modal')?.remove();
-    this.cart = [];
-    this.updateCartUI();
-    this.closeCart();
-    showToast('Order created. Payment is marked as pending.', 'info');
-    API.getOrder(orderId).then(res => {
-      const order = res.success ? res.order : { id: orderId, order_number: 'Order', status: 'PENDING' };
-      this.showOrderSuccess(order, pickupQrDataUrl, 'PENDING');
-    });
-  },
-
-  showOrderSuccess(order, qrDataUrl, method = 'UPI') {
+  showOrderSuccess(order, qrDataUrl, method = 'RAZORPAY') {
     const STATUS_STEPS = ['PENDING', 'PREPARING', 'READY', 'COMPLETED'];
     const currentIdx = STATUS_STEPS.indexOf(order.status) !== -1 ? STATUS_STEPS.indexOf(order.status) : 1;
 
@@ -807,9 +927,89 @@ const CustomerApp = {
           </div>
         </div>
 
-        <div style="display:flex;gap:10px;margin-top:16px">
+        <div style="display:flex;flex-direction:column;gap:10px;margin-top:16px">
+          <button class="btn btn-outline btn-full" onclick="CustomerApp.showReceiptModal(${order.id})">
+            📄 View / Print Digital Receipt
+          </button>
           <button class="btn btn-primary btn-full btn-lg" onclick="document.getElementById('order-success-modal').remove()">
             Done
+          </button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+  },
+
+  async showReceiptModal(orderId) {
+    const res = await API.getReceipt(orderId);
+    if (!res.success || !res.receipt) {
+      showToast('Could not load receipt', 'error');
+      return;
+    }
+
+    const r = res.receipt;
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay';
+    modal.id = 'receipt-modal';
+    modal.innerHTML = `
+      <div class="modal modal-lg" style="max-width:480px;text-align:left">
+        <div class="modal-header">
+          <div class="modal-title">Receipt #${r.order_number}</div>
+          <button class="btn btn-ghost btn-icon" onclick="document.getElementById('receipt-modal').remove()">✕</button>
+        </div>
+
+        <div id="printable-receipt" style="background:#fff;color:#111;padding:24px;border-radius:12px;font-family:monospace;margin:12px 0;box-shadow:0 4px 12px rgba(0,0,0,0.1)">
+          <div style="text-align:center;border-bottom:2px dashed #ccc;padding-bottom:12px;margin-bottom:12px">
+            <h2 style="margin:0;font-size:1.4rem">🍽️ SMART CANTEEN</h2>
+            <div style="font-size:0.8rem;color:#666">Official Tax Invoice / Cash Receipt</div>
+            <div style="font-size:0.75rem;color:#888;margin-top:4px">${new Date(r.created_at).toLocaleString()}</div>
+          </div>
+
+          <div style="display:flex;justify-content:space-between;font-size:0.85rem;margin-bottom:8px">
+            <span>Order No:</span>
+            <strong>${r.order_number}</strong>
+          </div>
+          ${r.token_number ? `
+          <div style="display:flex;justify-content:space-between;font-size:0.85rem;margin-bottom:8px">
+            <span>Pickup Token:</span>
+            <strong>#${r.token_number}</strong>
+          </div>` : ''}
+          <div style="display:flex;justify-content:space-between;font-size:0.85rem;margin-bottom:12px">
+            <span>Payment Method:</span>
+            <strong style="text-transform:uppercase">${r.payment_method || 'ONLINE'}</strong>
+          </div>
+
+          <div style="border-top:1px dashed #ccc;border-bottom:1px dashed #ccc;padding:10px 0;margin:10px 0">
+            <div style="display:flex;justify-content:space-between;font-weight:bold;font-size:0.85rem;margin-bottom:6px">
+              <span>Item</span>
+              <span>Qty × Price</span>
+              <span>Amount</span>
+            </div>
+            ${r.items.map(it => `
+              <div style="display:flex;justify-content:space-between;font-size:0.8rem;margin-bottom:4px">
+                <span>${escHtml(it.food_name)}</span>
+                <span>${it.quantity} × ₹${it.unit_price}</span>
+                <span>₹${it.subtotal}</span>
+              </div>
+            `).join('')}
+          </div>
+
+          <div style="display:flex;justify-content:space-between;font-size:1.2rem;font-weight:900;margin-top:12px">
+            <span>TOTAL PAID:</span>
+            <span>₹${r.total}</span>
+          </div>
+
+          <div style="text-align:center;font-size:0.75rem;color:#666;margin-top:18px;border-top:1px dashed #ccc;padding-top:12px">
+            Thank you for dining at Smart Canteen!<br>Show your token or QR code at the food counter.
+          </div>
+        </div>
+
+        <div style="display:flex;gap:10px;margin-top:12px">
+          <button class="btn btn-primary btn-full" onclick="window.print()">
+            🖨️ Print Receipt
+          </button>
+          <button class="btn btn-ghost" onclick="document.getElementById('receipt-modal').remove()">
+            Close
           </button>
         </div>
       </div>

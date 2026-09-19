@@ -53,6 +53,15 @@ const API = {
   confirmUPI:    (id, ref)  => API.post(`/api/orders/${id}/pay/upi/confirm`, { transactionRef: ref }),
   pickupBoard:   ()         => API.get('/api/orders/pickup/board'),
 
+  // Payments & Gateway
+  createPaymentOrder: (data)           => API.post('/api/payments/create-order', data),
+  verifyPayment:      (data)           => API.post('/api/payments/verify', data),
+  getPayments:        (params = {})    => API.get('/api/payments?' + new URLSearchParams(params)),
+  getPaymentById:     (id)             => API.get(`/api/payments/${id}`),
+  refundOrderPayment: (orderId, reason)=> API.post(`/api/payments/${orderId}/refund`, { reason }),
+  getReceipt:         (orderId)        => API.get(`/api/payments/receipt/${orderId}`),
+  verifyQR:           (token)          => API.post('/api/payments/qr/verify', { token }),
+
   // Counter Orders
   counterStockCheck: (items)       => API.post('/api/counter/stock-check', { items }),
   createCounterOrder:(data)        => API.post('/api/counter/orders', data),

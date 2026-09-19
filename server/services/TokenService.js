@@ -17,7 +17,7 @@ function generateToken(orderId) {
   // Count orders created today to get sequence number
   const row = db.prepare(`
     SELECT COUNT(*) as c FROM orders
-    WHERE DATE(created_at) = DATE('now', 'localtime')
+    WHERE DATE(created_at) = DATE('now')
     AND token_number IS NOT NULL
   `).get();
 

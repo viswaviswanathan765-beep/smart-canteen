@@ -1,4 +1,4 @@
-'use strict';
+require('dotenv').config();
 
 const express = require('express');
 const path    = require('path');
@@ -13,13 +13,18 @@ const ordersRouter    = require('./routes/orders');
 const counterRouter   = require('./routes/counter');
 const stockRouter     = require('./routes/stock');
 const analyticsRouter = require('./routes/analytics');
+const paymentsRouter  = require('./routes/payments');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
+// Middleware — preserves raw body for Razorpay webhook HMAC signature verification
 app.use(cors({ origin: true, credentials: true }));
-app.use(express.json());
+app.use(express.json({
+  verify: (req, res, buf) => {
+    req.rawBody = buf.toString('utf8');
+  }
+}));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
@@ -33,6 +38,9 @@ app.use('/api/orders',    ordersRouter);
 app.use('/api/counter',   counterRouter);
 app.use('/api/stock',     stockRouter);
 app.use('/api/analytics', analyticsRouter);
+app.use('/api/payments',  paymentsRouter);
+app.use('/api/qr',        paymentsRouter);
+
 
 // Health check
 app.get('/api/health', (req, res) => {

@@ -120,9 +120,12 @@ const AdminApp = {
               <span class="nav-icon">📦</span> Stock
             </div>
 
-            <div class="nav-section-label">Reports</div>
+            <div class="nav-section-label">Reports & Finance</div>
             <div class="nav-item" id="nav-analytics" onclick="AdminApp.navigate('analytics')">
               <span class="nav-icon">💰</span> Analytics
+            </div>
+            <div class="nav-item" id="nav-payments" onclick="AdminApp.navigate('payments')">
+              <span class="nav-icon">💳</span> Payments Audit
             </div>
           </nav>
 
@@ -177,6 +180,7 @@ const AdminApp = {
       menu: 'Manage Menu',
       stock: 'Stock Management',
       analytics: 'Analytics',
+      payments: 'Payments & Transactions Audit',
     };
     const titleEl = document.getElementById('topbar-title');
     if (titleEl) titleEl.textContent = titles[section] || section;
@@ -189,6 +193,7 @@ const AdminApp = {
       menu:            () => this.loadMenu(),
       stock:           () => this.loadStock(),
       analytics:       () => this.loadAnalytics(),
+      payments:        () => this.loadPayments(),
     };
 
     if (sections[section]) sections[section]();
@@ -779,6 +784,223 @@ const AdminApp = {
         </div>
       </div>
     `);
+  },
+
+  // ---- Payments Audit Section ----
+  async loadPayments(filter = {}) {
+    this.setContent(`
+      <div class="flex items-center justify-center" style="height:300px">
+        <span class="spinner" style="width:40px;height:40px"></span>
+      </div>
+    `);
+
+    const result = await API.getPayments(filter);
+    const payments = result.success ? result.payments : [];
+
+    const totalCaptured = payments
+      .filter(p => p.status === 'CAPTURED')
+      .reduce((s, p) => s + (p.amount_paise ? p.amount_paise / 100 : p.amount_due), 0);
+    const onlineCaptured = payments
+      .filter(p => p.status === 'CAPTURED' && p.provider === 'RAZORPAY')
+      .reduce((s, p) => s + (p.amount_paise ? p.amount_paise / 100 : p.amount_due), 0);
+    const cashCaptured = payments
+      .filter(p => p.status === 'CAPTURED' && p.provider === 'CASH')
+      .reduce((s, p) => s + (p.amount_paise ? p.amount_paise / 100 : p.amount_due), 0);
+    const refundedTotal = payments
+      .filter(p => p.status === 'REFUNDED')
+      .reduce((s, p) => s + (p.amount_paise ? p.amount_paise / 100 : p.amount_due), 0);
+
+    const rows = payments.map(p => {
+      const amt = p.amount_paise ? (p.amount_paise / 100).toFixed(2) : p.amount_due.toFixed(2);
+      const statusColors = {
+        CAPTURED: 'background:rgba(16,185,129,0.15);color:#10b981',
+        REFUNDED: 'background:rgba(239,68,68,0.15);color:#ef4444',
+        FAILED: 'background:rgba(239,68,68,0.15);color:#ef4444',
+        CREATED: 'background:rgba(245,158,11,0.15);color:#f59e0b',
+        PENDING: 'background:rgba(245,158,11,0.15);color:#f59e0b',
+      };
+      const badgeStyle = statusColors[p.status] || 'background:rgba(255,255,255,0.1);color:#fff';
+
+      return `
+        <tr>
+          <td><strong style="font-family:monospace">#${p.id}</strong></td>
+          <td><strong style="color:var(--primary)">${escHtml(p.order_number)}</strong></td>
+          <td>${escHtml(p.customer_name || 'Walk-in')} <span class="badge" style="font-size:0.7rem">${p.customer_type || ''}</span></td>
+          <td>
+            <span class="badge">${p.provider}</span>
+            <span style="font-size:0.75rem;color:var(--text-muted)">(${p.method})</span>
+          </td>
+          <td><strong style="font-size:0.95rem">₹${amt}</strong></td>
+          <td>
+            <span style="display:inline-block;padding:3px 8px;border-radius:6px;font-size:0.75rem;font-weight:700;${badgeStyle}">
+              ${p.status}
+            </span>
+          </td>
+          <td style="font-size:0.8rem">
+            ${p.signature_verified ? '<span title="Signature verified">🔒✓</span>' : '<span style="color:#888">—</span>'}
+            ${p.webhook_verified ? '<span title="Webhook verified">⚡✓</span>' : ''}
+          </td>
+          <td style="font-size:0.8rem;color:var(--text-secondary)">${new Date(p.created_at).toLocaleString()}</td>
+          <td>
+            <div class="flex gap-1">
+              <button class="btn btn-ghost btn-sm" onclick="AdminApp.viewReceipt(${p.order_id})" title="View Digital Receipt">
+                📄
+              </button>
+              ${p.status === 'CAPTURED' ? `
+                <button class="btn btn-danger btn-sm" onclick="AdminApp.refundPayment(${p.order_id})" title="Refund Payment">
+                  ↩️
+                </button>
+              ` : ''}
+            </div>
+          </td>
+        </tr>
+      `;
+    }).join('');
+
+    this.setContent(`
+      <div class="stats-grid" style="margin-bottom:20px">
+        <div class="stat-card" style="--stat-color:var(--success)">
+          <div class="stat-icon">💰</div>
+          <div class="stat-label">Verified Revenue</div>
+          <div class="stat-value">₹${totalCaptured.toFixed(2)}</div>
+          <div class="stat-subvalue">From captured payments</div>
+        </div>
+        <div class="stat-card" style="--stat-color:var(--info)">
+          <div class="stat-icon">💳</div>
+          <div class="stat-label">Razorpay / Online</div>
+          <div class="stat-value">₹${onlineCaptured.toFixed(2)}</div>
+          <div class="stat-subvalue">Gateway transactions</div>
+        </div>
+        <div class="stat-card" style="--stat-color:var(--accent)">
+          <div class="stat-icon">💵</div>
+          <div class="stat-label">Counter Cash</div>
+          <div class="stat-value">₹${cashCaptured.toFixed(2)}</div>
+          <div class="stat-subvalue">Physical register</div>
+        </div>
+        <div class="stat-card" style="--stat-color:var(--danger)">
+          <div class="stat-icon">↩️</div>
+          <div class="stat-label">Refunds</div>
+          <div class="stat-value">₹${refundedTotal.toFixed(2)}</div>
+          <div class="stat-subvalue">Reversed transactions</div>
+        </div>
+      </div>
+
+      <div class="chart-card">
+        <div class="flex justify-between items-center mb-3" style="flex-wrap:wrap;gap:10px">
+          <div>
+            <div class="chart-title">💳 Payments & Settlement Ledger</div>
+            <div class="chart-subtitle">Audit trail of all online and counter payments</div>
+          </div>
+          <div class="flex gap-2">
+            <select class="form-control form-control-sm" id="pay-filter-provider" onchange="AdminApp.applyPaymentFilters()">
+              <option value="">All Providers</option>
+              <option value="RAZORPAY" ${filter.provider === 'RAZORPAY' ? 'selected' : ''}>Razorpay</option>
+              <option value="CASH" ${filter.provider === 'CASH' ? 'selected' : ''}>Cash Register</option>
+            </select>
+            <select class="form-control form-control-sm" id="pay-filter-status" onchange="AdminApp.applyPaymentFilters()">
+              <option value="">All Statuses</option>
+              <option value="CAPTURED" ${filter.status === 'CAPTURED' ? 'selected' : ''}>Captured / Paid</option>
+              <option value="CREATED" ${filter.status === 'CREATED' ? 'selected' : ''}>Created / Pending</option>
+              <option value="REFUNDED" ${filter.status === 'REFUNDED' ? 'selected' : ''}>Refunded</option>
+              <option value="FAILED" ${filter.status === 'FAILED' ? 'selected' : ''}>Failed</option>
+            </select>
+            <button class="btn btn-ghost btn-sm" onclick="AdminApp.loadPayments()">🔄 Refresh</button>
+          </div>
+        </div>
+
+        <div class="table-responsive">
+          <table class="table" style="width:100%">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Order</th>
+                <th>Customer</th>
+                <th>Provider (Method)</th>
+                <th>Amount</th>
+                <th>Status</th>
+                <th>Security</th>
+                <th>Timestamp</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rows || '<tr><td colspan="9" style="text-align:center;color:var(--text-muted);padding:24px">No payment records found</td></tr>'}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `);
+  },
+
+  applyPaymentFilters() {
+    const provider = document.getElementById('pay-filter-provider')?.value || '';
+    const status = document.getElementById('pay-filter-status')?.value || '';
+    this.loadPayments({ provider, status });
+  },
+
+  async viewReceipt(orderId) {
+    const res = await API.getReceipt(orderId);
+    if (!res.success || !res.receipt) {
+      showToast('Receipt not found', 'error');
+      return;
+    }
+
+    const r = res.receipt;
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay';
+    modal.id = 'admin-receipt-modal';
+    modal.innerHTML = `
+      <div class="modal modal-lg" style="max-width:440px;text-align:left">
+        <div class="modal-header">
+          <div class="modal-title">Receipt #${r.order_number}</div>
+          <button class="btn btn-ghost btn-icon" onclick="document.getElementById('admin-receipt-modal').remove()">✕</button>
+        </div>
+
+        <div style="background:#fff;color:#111;padding:20px;border-radius:10px;font-family:monospace;margin:12px 0">
+          <div style="text-align:center;border-bottom:2px dashed #ccc;padding-bottom:8px;margin-bottom:12px">
+            <h3 style="margin:0">🍽️ SMART CANTEEN</h3>
+            <div style="font-size:0.75rem;color:#666">${new Date(r.created_at).toLocaleString()}</div>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:0.85rem"><span>Order:</span><strong>${r.order_number}</strong></div>
+          <div style="display:flex;justify-content:space-between;font-size:0.85rem"><span>Payment:</span><strong>${r.payment_method} (${r.payment_status})</strong></div>
+          <div style="border-top:1px dashed #ccc;border-bottom:1px dashed #ccc;padding:8px 0;margin:8px 0">
+            ${r.items.map(it => `
+              <div style="display:flex;justify-content:space-between;font-size:0.8rem">
+                <span>${escHtml(it.food_name)} × ${it.quantity}</span>
+                <span>₹${it.subtotal}</span>
+              </div>
+            `).join('')}
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:1.1rem;font-weight:bold">
+            <span>TOTAL:</span><span>₹${r.total}</span>
+          </div>
+        </div>
+
+        <div class="flex gap-2">
+          <button class="btn btn-primary btn-full" onclick="window.print()">🖨️ Print</button>
+          <button class="btn btn-ghost" onclick="document.getElementById('admin-receipt-modal').remove()">Close</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+  },
+
+  async refundPayment(orderId) {
+    const reason = prompt('Enter reason for refund:');
+    if (reason === null) return;
+
+    if (!confirm('Are you sure you want to process a full refund for this order? Inventory will be restored.')) {
+      return;
+    }
+
+    const res = await API.refundOrderPayment(orderId, reason || 'Admin initiated refund');
+    if (!res.success) {
+      showToast(res.message || 'Refund failed', 'error');
+      return;
+    }
+
+    showToast('Refund processed successfully! ✅', 'success');
+    this.loadPayments();
   },
 
   // ---- POS Overlay HTML ----

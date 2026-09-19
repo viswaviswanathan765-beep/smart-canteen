@@ -9,19 +9,22 @@
     "test": "jest --testEnvironment node"
   },
   "dependencies": {
-    "sql.js": "^1.12.0",
     "bcryptjs": "^2.4.3",
     "cookie-parser": "^1.4.6",
     "cors": "^2.8.5",
+    "dotenv": "^18.0.1",
     "express": "^4.18.3",
     "jsonwebtoken": "^9.0.2",
-    "qrcode": "^1.5.3"
+    "qrcode": "^1.5.3",
+    "sql.js": "^1.12.0"
   },
   "devDependencies": {
     "jest": "^29.7.0",
     "nodemon": "^3.1.0"
   },
   "jest": {
-    "testMatch": ["**/tests/**/*.test.js"]
+    "testMatch": [
+      "**/tests/**/*.test.js"
+    ]
   }
 }
